@@ -1,0 +1,240 @@
+"""Reconciles the dashboard's KPI computation to the source pipeline's own
+recorded ground truth (`data/sample/known_totals.json`, the mismatch report
+written by the same run that produced the vendored sample DB), and exercises
+every finding class this demo was designed against: strict schema
+validation (missing file, zero-byte file, wrong-schema file), the
+completeness banner never showing an incomplete run as complete, exact
+per-currency (never cross-currency) reconciliation, complete pagination of
+the mismatch drill-down, and CSV formula-injection sanitisation."""
+
+from __future__ import annotations
+
+import duckdb
+import pytest
+
+from kpi_dashboard import kpis
+
+CURRENCIES = ("EUR", "GBP", "USD")
+
+
+# --------------------------------------------------------------------------
+# Known-total reconciliation
+# --------------------------------------------------------------------------
+
+
+def test_kpi_summary_matches_known_totals_exactly(con, run_id, known_totals):
+    summary = kpis.kpi_summary(con, run_id)
+    assert set(summary) == set(CURRENCIES)
+    for currency in CURRENCIES:
+        expected = known_totals["totals_cents"][currency]
+        actual = summary[currency]
+        for field in ("gross_cents", "net_cents", "refunds_cents", "paid_cents", "ordered_cents", "unmatched_cents"):
+            assert actual[field] == expected[field], f"{currency}.{field}"
+
+
+def test_unmatched_count_sums_across_currencies_matches_known_total(con, run_id, known_totals):
+    summary = kpis.kpi_summary(con, run_id)
+    total_unmatched_count = sum(row["unmatched_count"] for row in summary.values())
+    assert total_unmatched_count == known_totals["totals_cents"]["unmatched_count"]
+
+
+def test_mismatch_summary_matches_known_totals_exactly(con, run_id, known_totals):
+    mm = kpis.mismatch_summary(con, run_id)
+    assert set(mm) == set(kpis.MISMATCH_CATEGORIES)
+    for category, expected in known_totals["mismatches"].items():
+        actual = mm[category]
+        actual_count = sum(v["count"] for v in actual.values())
+        assert actual_count == expected["count"], category
+        for currency, expected_amount in expected["amount_cents_by_currency"].items():
+            assert actual[currency]["amount_cents"] == expected_amount, f"{category}/{currency}"
+    # indeterminate_incomplete_source had zero findings in this complete run
+    assert mm["indeterminate_incomplete_source"] == {}
+
+
+def test_daily_trend_sums_to_the_same_kpi_summary_per_currency(con, run_id):
+    """Cross-check: summing the daily trend rows reproduces kpi_summary -
+    two independent query shapes over the same table must agree."""
+    summary = kpis.kpi_summary(con, run_id)
+    trend = kpis.daily_trend(con, run_id)
+    from collections import defaultdict
+
+    totals = defaultdict(lambda: defaultdict(int))
+    for row in trend:
+        for field in ("gross_cents", "net_cents", "refunds_cents", "paid_cents", "ordered_cents", "unmatched_cents"):
+            totals[row["currency"]][field] += row[field]
+    for currency in CURRENCIES:
+        for field in totals[currency]:
+            assert totals[currency][field] == summary[currency][field], f"{currency}.{field}"
+
+
+def test_run_status_is_complete_for_the_vendored_sample(con, run_id, known_totals):
+    run_row = kpis.get_run(con, run_id)
+    assert run_row["status"] == known_totals["status"] == "complete"
+    assert kpis.is_incomplete(run_row) is False
+
+
+# --------------------------------------------------------------------------
+# Completeness banner logic (pure - no DB needed)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "status,expected",
+    [("complete", False), ("incomplete", True), ("failed", True)],
+)
+def test_is_incomplete_never_treats_a_non_complete_run_as_complete(status, expected):
+    assert kpis.is_incomplete({"status": status}) is expected
+
+
+def test_incomplete_source_list_parses_csv_field():
+    assert kpis.incomplete_source_list({"incomplete_sources": "orders,refunds"}) == ["orders", "refunds"]
+    assert kpis.incomplete_source_list({"incomplete_sources": ""}) == []
+    assert kpis.incomplete_source_list({}) == []
+
+
+# --------------------------------------------------------------------------
+# Schema / input validation: zero-byte, missing, wrong-schema files
+# --------------------------------------------------------------------------
+
+
+def test_open_database_rejects_missing_file(tmp_path):
+    with pytest.raises(kpis.SchemaError, match="not found"):
+        kpis.open_database(tmp_path / "does_not_exist.duckdb")
+
+
+def test_open_database_rejects_zero_byte_file(tmp_path):
+    p = tmp_path / "empty.duckdb"
+    p.write_bytes(b"")
+    with pytest.raises(kpis.SchemaError, match="zero bytes"):
+        kpis.open_database(p)
+
+
+def test_open_database_rejects_non_database_file(tmp_path):
+    p = tmp_path / "not_a_db.duckdb"
+    p.write_text("this is plainly not a duckdb file, just some header-ish text\n")
+    with pytest.raises(kpis.SchemaError):
+        kpis.open_database(p)
+
+
+def test_open_database_rejects_database_missing_required_tables(tmp_path):
+    p = tmp_path / "wrong_schema.duckdb"
+    con = duckdb.connect(str(p))
+    con.execute("CREATE TABLE orders (order_id VARCHAR)")
+    con.close()
+    with pytest.raises(kpis.SchemaError, match="missing required table"):
+        kpis.open_database(p)
+
+
+def test_open_database_accepts_the_vendored_sample():
+    con = kpis.open_database(
+        __import__("pathlib").Path(__file__).resolve().parents[1] / "data" / "sample" / "reconciliation.duckdb"
+    )
+    try:
+        assert kpis.latest_run_id(con)
+    finally:
+        con.close()
+
+
+def test_empty_database_error_on_db_with_no_runs(tmp_path):
+    p = tmp_path / "no_runs.duckdb"
+    con = duckdb.connect(str(p))
+    con.execute(
+        "CREATE TABLE runs (run_id VARCHAR, run_at TIMESTAMP, source_note VARCHAR, "
+        "status VARCHAR, incomplete_sources VARCHAR, issue_count BIGINT)"
+    )
+    for table in kpis.REQUIRED_TABLES:
+        if table != "runs":
+            con.execute(f"CREATE TABLE {table} (dummy INTEGER)")
+    con.close()
+    con2 = kpis.open_database(p)
+    try:
+        with pytest.raises(kpis.EmptyDatabaseError):
+            kpis.latest_run_id(con2)
+        assert kpis.list_runs(con2) == []
+    finally:
+        con2.close()
+
+
+# --------------------------------------------------------------------------
+# Pagination and completeness of the mismatch drill-down
+# --------------------------------------------------------------------------
+
+
+def test_mismatch_pages_cover_every_row_exactly_once(con, run_id):
+    seen = []
+    offset = 0
+    limit = 3
+    total = None
+    for _ in range(1000):  # hard bound so a bug can't hang the test
+        page = kpis.mismatch_page(con, run_id, offset=offset, limit=limit)
+        total = page.total_count
+        seen.extend((r["run_id"], r["id"]) for r in page.rows)
+        if not page.has_more:
+            break
+        offset += limit
+    else:
+        pytest.fail("pagination did not terminate")
+
+    assert len(seen) == total
+    assert len(set(seen)) == total, "pagination must not repeat a row"
+
+    direct = con.execute("SELECT run_id, id FROM mismatches WHERE run_id = ?", [run_id]).fetchall()
+    assert sorted(seen) == sorted(direct)
+
+
+def test_mismatch_page_total_count_matches_filtered_query(con, run_id):
+    page = kpis.mismatch_page(con, run_id, category="missing_payment", limit=100)
+    direct_count = con.execute(
+        "SELECT COUNT(*) FROM mismatches WHERE run_id = ? AND category = ?", [run_id, "missing_payment"]
+    ).fetchone()[0]
+    assert page.total_count == direct_count
+    assert all(r["category"] == "missing_payment" for r in page.rows)
+
+
+def test_mismatch_page_rejects_bad_arguments(con, run_id):
+    with pytest.raises(ValueError):
+        kpis.mismatch_page(con, run_id, limit=0)
+    with pytest.raises(ValueError):
+        kpis.mismatch_page(con, run_id, offset=-1)
+
+
+# --------------------------------------------------------------------------
+# CSV formula injection
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("dangerous", ["=1+1", "+1+1", "-1+1", "@SUM(A1)", "\tformula", "\rformula"])
+def test_sanitize_for_csv_export_neutralises_formula_triggers(dangerous):
+    out = kpis.sanitize_for_csv_export(dangerous)
+    assert out.startswith("'")
+    assert out[1:] == dangerous
+
+
+@pytest.mark.parametrize("safe", ["normal text", "", "order-123", None, 42, 12.5])
+def test_sanitize_for_csv_export_leaves_safe_values_unchanged(safe):
+    assert kpis.sanitize_for_csv_export(safe) == safe
+
+
+def test_no_mismatch_detail_field_would_pass_csv_export_unsanitised(con, run_id):
+    """Regression guard: if the sample ever grows a details string that looks
+    like a formula, this fails loudly instead of silently shipping it."""
+    page = kpis.mismatch_page(con, run_id, limit=1000)
+    for row in page.rows:
+        for field in ("details", "order_id", "payment_id", "refund_id"):
+            value = row[field]
+            sanitized = kpis.sanitize_for_csv_export(value)
+            if isinstance(value, str) and value.startswith(("=", "+", "-", "@", "\t", "\r")):
+                assert sanitized.startswith("'")
+
+
+# --------------------------------------------------------------------------
+# format_cents
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "cents,expected",
+    [(0, "0.00"), (1, "0.01"), (100, "1.00"), (123456, "1234.56"), (-150, "-1.50")],
+)
+def test_format_cents(cents, expected):
+    assert kpis.format_cents(cents) == expected

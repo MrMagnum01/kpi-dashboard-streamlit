@@ -1,0 +1,92 @@
+{
+  "run_id": "run-20260927T042318",
+  "status": "complete",
+  "ok": true,
+  "sources": {
+    "orders": "ok",
+    "payments": "ok",
+    "refunds": "ok"
+  },
+  "incomplete_sources": [],
+  "totals_cents": {
+    "EUR": {
+      "gross_cents": 665423,
+      "net_cents": 637707,
+      "refunds_cents": 27716,
+      "paid_cents": 665423,
+      "ordered_cents": 613121,
+      "unmatched_cents": 48270
+    },
+    "GBP": {
+      "gross_cents": 487405,
+      "net_cents": 462293,
+      "refunds_cents": 25112,
+      "paid_cents": 487405,
+      "ordered_cents": 446324,
+      "unmatched_cents": 63237
+    },
+    "USD": {
+      "gross_cents": 1843833,
+      "net_cents": 1692684,
+      "refunds_cents": 151149,
+      "paid_cents": 1843833,
+      "ordered_cents": 1869579,
+      "unmatched_cents": 0
+    },
+    "unmatched_count": 3,
+    "indeterminate_count": 0
+  },
+  "mismatches": {
+    "missing_payment": {
+      "count": 6,
+      "amount_cents_by_currency": {
+        "EUR": 64646,
+        "GBP": 11484,
+        "USD": 37428
+      }
+    },
+    "overpayment": {
+      "count": 5,
+      "amount_cents_by_currency": {
+        "EUR": 1809,
+        "GBP": 2277,
+        "USD": 4114
+      }
+    },
+    "duplicate": {
+      "count": 5,
+      "amount_cents_by_currency": {
+        "GBP": 9241,
+        "USD": 52247
+      }
+    },
+    "currency_mismatch": {
+      "count": 4,
+      "amount_cents_by_currency": {
+        "EUR": 66869
+      }
+    },
+    "orphan_refund": {
+      "count": 4,
+      "amount_cents_by_currency": {
+        "GBP": 21713,
+        "USD": 12712
+      }
+    }
+  },
+  "api_failures": [],
+  "parse_errors": [],
+  "conflicts": [],
+  "conflicts_count": 0,
+  "counts": {
+    "orders_ingested": 130,
+    "payments_loaded": 122,
+    "refunds_loaded": 14,
+    "exact_duplicates_dropped": {
+      "orders": 0,
+      "payments": 0,
+      "refunds": 0
+    },
+    "rows_rejected_for_conflict": 0
+  }
+}
