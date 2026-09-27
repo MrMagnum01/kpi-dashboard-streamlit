@@ -229,7 +229,6 @@ src/kpi_dashboard/
   app.py           Streamlit UI; renders what kpis.py returns, computes nothing itself
 streamlit_app.py   thin launcher (`streamlit run streamlit_app.py`) that wires src/ onto sys.path
 tests/             pytest suite (see "Tests" above)
-scripts/screenshot.py  optional local dev script, not part of the demo (see "QA screenshots" above)
 data/sample/       vendored sample DuckDB + its known-totals ground truth (see PROVENANCE.md)
 docs/schema.md     the DuckDB schema this dashboard reads, reproduced from revenue-reconciliation
 LICENSES.md        every open-source library used and its licence

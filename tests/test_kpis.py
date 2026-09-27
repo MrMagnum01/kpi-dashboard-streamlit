@@ -9,12 +9,16 @@ the mismatch drill-down, and CSV formula-injection sanitisation."""
 
 from __future__ import annotations
 
+import shutil
+from pathlib import Path
+
 import duckdb
 import pytest
 
 from kpi_dashboard import kpis
 
 CURRENCIES = ("EUR", "GBP", "USD")
+SAMPLE_DB = Path(__file__).resolve().parents[1] / "data" / "sample" / "reconciliation.duckdb"
 
 
 # --------------------------------------------------------------------------
@@ -137,16 +141,18 @@ def test_open_database_accepts_the_vendored_sample():
 
 def _create_full_schema(con, *, omit: tuple[str, str] | None = None) -> None:
     """Create every REQUIRED_TABLES table with every column this module
-    reads (REQUIRED_COLUMNS), all VARCHAR and empty - a minimal but
-    column-complete schema. ``omit=(table, column)`` drops one column, to
-    build an older-schema-version fixture for a single missing-column case."""
+    reads (REQUIRED_COLUMNS), each at its documented type
+    (REQUIRED_COLUMN_TYPES) and empty - a minimal but column-and-type
+    -complete schema. ``omit=(table, column)`` drops one column, to build an
+    older-schema-version fixture for a single missing-column case."""
     for table in kpis.REQUIRED_TABLES:
         columns = list(kpis.REQUIRED_COLUMNS.get(table, ()))
         if not columns:
             columns = ["dummy"]
         if omit is not None and omit[0] == table:
             columns = [c for c in columns if c != omit[1]]
-        col_defs = ", ".join(f"{c} VARCHAR" for c in columns)
+        types = kpis.REQUIRED_COLUMN_TYPES.get(table, {})
+        col_defs = ", ".join(f"{c} {types.get(c, 'VARCHAR')}" for c in columns)
         con.execute(f"CREATE TABLE {table} ({col_defs})")
 
 
@@ -159,6 +165,23 @@ def test_open_database_rejects_database_missing_required_column(tmp_path):
     _create_full_schema(con, omit=("runs", "status"))
     con.close()
     with pytest.raises(kpis.SchemaError, match=r"missing required column.*runs\.status"):
+        kpis.open_database(p)
+
+
+def test_open_database_rejects_incompatible_column_type(tmp_path):
+    """A text amount column (or any other required column at the wrong
+    DuckDB type) must be caught at open_database, not accepted only to
+    crash the first time a query binds it - see the rereview type probe:
+    ALTER TABLE daily_kpis ALTER COLUMN gross_cents TYPE VARCHAR made
+    open_database accept the file and kpi_summary raise an uncaught
+    duckdb.BinderException (2026-09-27-astra-kpi-dashboard-rereview-type-*).
+    """
+    p = tmp_path / "sample_copy.duckdb"
+    shutil.copy(SAMPLE_DB, p)
+    con = duckdb.connect(str(p))
+    con.execute("ALTER TABLE daily_kpis ALTER COLUMN gross_cents TYPE VARCHAR")
+    con.close()
+    with pytest.raises(kpis.SchemaError, match=r"incompatible type.*daily_kpis\.gross_cents"):
         kpis.open_database(p)
 
 

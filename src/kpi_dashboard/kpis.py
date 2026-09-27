@@ -67,6 +67,57 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+# Expected DuckDB `information_schema.columns.data_type` for every column in
+# REQUIRED_COLUMNS (types are as documented in docs/schema.md). A column of
+# the right name but the wrong type (e.g. daily_kpis.gross_cents written as
+# VARCHAR instead of BIGINT) passes the missing-column check above and then
+# fails only deep inside a query, as an uncaught duckdb.BinderException -
+# check this before returning the connection.
+REQUIRED_COLUMN_TYPES: dict[str, dict[str, str]] = {
+    "runs": {
+        "run_id": "VARCHAR",
+        "run_at": "TIMESTAMP",
+        "source_note": "VARCHAR",
+        "status": "VARCHAR",
+        "incomplete_sources": "VARCHAR",
+        "issue_count": "BIGINT",
+    },
+    "daily_kpis": {
+        "run_id": "VARCHAR",
+        "day": "DATE",
+        "currency": "VARCHAR",
+        "gross_cents": "BIGINT",
+        "net_cents": "BIGINT",
+        "refunds_cents": "BIGINT",
+        "paid_cents": "BIGINT",
+        "ordered_cents": "BIGINT",
+        "unmatched_count": "BIGINT",
+        "unmatched_cents": "BIGINT",
+    },
+    "mismatches": {
+        "run_id": "VARCHAR",
+        "id": "BIGINT",
+        "category": "VARCHAR",
+        "day": "DATE",
+        "order_id": "VARCHAR",
+        "payment_id": "VARCHAR",
+        "refund_id": "VARCHAR",
+        "currency": "VARCHAR",
+        "amount_cents": "BIGINT",
+        "details": "VARCHAR",
+    },
+    "run_issues": {
+        "run_id": "VARCHAR",
+        "id": "BIGINT",
+        "source": "VARCHAR",
+        "kind": "VARCHAR",
+        "category": "VARCHAR",
+        "record_id": "VARCHAR",
+        "line_number": "BIGINT",
+        "detail": "VARCHAR",
+    },
+}
+
 
 def open_database(db_path: str | Path) -> duckdb.DuckDBPyConnection:
     """Open the DuckDB file read-only, validating it before returning it.
@@ -107,10 +158,13 @@ def open_database(db_path: str | Path) -> duckdb.DuckDBPyConnection:
         # which would otherwise pass this check and only fail later with an
         # uncaught duckdb.BinderException deep in a query. Check columns too.
         cols_by_table: dict[str, set[str]] = {}
-        for table_name, column_name in con.execute(
-            "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = 'main'"
+        types_by_table: dict[str, dict[str, str]] = {}
+        for table_name, column_name, data_type in con.execute(
+            "SELECT table_name, column_name, data_type FROM information_schema.columns "
+            "WHERE table_schema = 'main'"
         ).fetchall():
             cols_by_table.setdefault(table_name, set()).add(column_name)
+            types_by_table.setdefault(table_name, {})[column_name] = data_type
         missing_columns = [
             f"{table}.{column}"
             for table, columns in REQUIRED_COLUMNS.items()
@@ -122,6 +176,24 @@ def open_database(db_path: str | Path) -> duckdb.DuckDBPyConnection:
             raise SchemaError(
                 f"database is missing required column(s) {missing_columns}: {path} "
                 "(wrong file, or written by an older schema version)"
+            )
+
+        # Column present but the wrong type (e.g. a text amount column, or a
+        # non-date date column) still passes the check above and would
+        # otherwise only fail later, mid-query, as an uncaught
+        # duckdb.BinderException. Check the type of every column this module
+        # actually reads before returning the connection.
+        wrong_type_columns = [
+            f"{table}.{column} (expected {expected_type}, got {types_by_table[table][column]})"
+            for table, columns in REQUIRED_COLUMN_TYPES.items()
+            for column, expected_type in columns.items()
+            if types_by_table.get(table, {}).get(column) != expected_type
+        ]
+        if wrong_type_columns:
+            con.close()
+            raise SchemaError(
+                f"database has required column(s) with an incompatible type {wrong_type_columns}: {path} "
+                "(wrong file, or written by an older/incompatible schema version)"
             )
     except duckdb.Error as exc:
         con.close()

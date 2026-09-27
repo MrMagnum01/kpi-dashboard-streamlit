@@ -60,12 +60,6 @@ Pulled in by `streamlit` unless noted. Versions are what a clean
 | watchdog | 6.0.0 | Apache-2.0 | streamlit |
 | websockets | 16.1.1 | BSD-3-Clause | streamlit |
 
-## Dev-only tooling (not required to run the app or the test suite)
-
-| Library | Licence | Used for |
-|---|---|---|
-| [websocket-client](https://github.com/websocket-client/websocket-client) | Apache-2.0 | `scripts/screenshot.py` only, an optional local dev script that is not part of the demo (see README's "QA screenshots"). Not imported by `src/` or `tests/`, and not in `requirements.txt`; install it ad hoc (`pip install websocket-client`) only to run that script. |
-
 ## Notices
 
 These licences require their copyright and licence notices to be kept with
