@@ -194,15 +194,26 @@ def render() -> None:
         currency_filter = filter_cols[1].selectbox("Currency", options=["(all)"] + currencies_present)
         page_size = filter_cols[2].selectbox("Rows per page", options=[10, 25, 50, 100], index=1)
 
-        if "mismatch_page_offset" not in st.session_state:
-            st.session_state.mismatch_page_offset = 0
+        query_key = kpis.mismatch_query_key(
+            run_id,
+            category=None if category_filter == "(all)" else category_filter,
+            currency=None if currency_filter == "(all)" else currency_filter,
+            limit=page_size,
+        )
+        offset = kpis.resolve_page_offset(
+            st.session_state.get("mismatch_page_offset", 0),
+            st.session_state.get("mismatch_query_key"),
+            query_key,
+        )
+        st.session_state.mismatch_page_offset = offset
+        st.session_state.mismatch_query_key = query_key
 
         page = kpis.mismatch_page(
             con,
             run_id,
             category=None if category_filter == "(all)" else category_filter,
             currency=None if currency_filter == "(all)" else currency_filter,
-            offset=st.session_state.mismatch_page_offset,
+            offset=offset,
             limit=page_size,
         )
 

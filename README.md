@@ -91,13 +91,26 @@ export PYTHONPATH=src   # or rely on pytest.ini's pythonpath=src
 pytest tests -v
 ```
 
-36/36 passing. Covers:
+42/42 passing. Covers:
 - **Known-total reconciliation** (`test_kpi_summary_matches_known_totals_exactly`,
   `test_mismatch_summary_matches_known_totals_exactly`) - every per-currency
   KPI and every mismatch category/currency figure the dashboard computes is
   asserted equal, to the cent, against `data/sample/known_totals.json` - the
-  mismatch report the source pipeline itself wrote for the same run,
-  independently of this dashboard's queries.
+  mismatch report the *same* upstream reconciliation run wrote about
+  itself. This is a consistency check (this dashboard's SQL reproduces
+  that run's own recorded numbers exactly), not an independent check of
+  the upstream reconciliation logic - see "How the sample database was
+  produced" below for exactly what is and isn't reconciled here.
+- **Pagination/filter-state regression** (`test_resolve_page_offset_*`,
+  `test_pagination_survives_a_filter_change_end_to_end`) - the drill-down
+  page offset is a pure function of the query identity (run, category,
+  currency, page size); changing any of those resets to page 1 instead of
+  reusing a numeric offset that can outrun a smaller filtered result set.
+- **Schema validation of required columns** (`test_open_database_rejects_database_missing_required_column`) -
+  a database with every required table but missing a column this
+  dashboard queries (e.g. an older schema with no `runs.status`) is
+  rejected at `open_database` with a `SchemaError`, not accepted and left
+  to crash the first time a query touches that column.
 - **Cross-check** (`test_daily_trend_sums_to_the_same_kpi_summary_per_currency`) -
   summing the daily-trend query's rows reproduces the KPI-summary query's
   totals; two independently written SQL queries over the same table must
@@ -118,8 +131,10 @@ pytest tests -v
   `COUNT(*)` under the same filter.
 - **Formula injection** (`test_sanitize_for_csv_export_neutralises_formula_triggers`) -
   any string starting with `=`, `+`, `-`, `@`, a tab, or a carriage return
-  gets a literal leading apostrophe before it can reach a downloaded CSV,
-  so a spreadsheet never evaluates untrusted upstream text as a formula.
+  gets a literal leading apostrophe before it can reach a downloaded CSV.
+  Tested at the string-transform level only (no spreadsheet application
+  was opened as part of this test suite - see "Formula safety" below for
+  exactly what that does and doesn't establish).
 - **format_cents** - integer-cents formatting stays exact at zero, one
   cent, and negative values; no float ever enters the money path.
 
@@ -127,15 +142,24 @@ pytest tests -v
 
 Every string value that can reach the "download this page as CSV" button
 (`details`, ids, categories) is passed through
-`kpis.sanitize_for_csv_export` first: a value starting with a
-formula-trigger character (`=`, `+`, `-`, `@`, tab, or carriage return)
-gets a literal leading apostrophe, which every major spreadsheet renders
-as plain text rather than evaluating as a formula when the CSV is opened.
-This dashboard does not write `.xlsx` files at all (only CSV, via
-Streamlit's own download button), so there is no live-formula-cell
-concern the way there is in the `excel-consolidation` demo - the CSV
-formula-injection vector is the one that applies here, and it is defended
-at the same layer the export happens in (`kpis.py`, tested directly).
+`kpis.sanitize_for_csv_export` first: a value starting with one of the six
+formula-trigger characters this function checks for (`=`, `+`, `-`, `@`,
+tab, or carriage return) gets a literal leading apostrophe prepended -
+the widely-documented CSV formula-injection mitigation for spreadsheet
+software that treats a leading `=`/`+`/`-`/`@` as a formula marker. What
+is actually tested here (`tests/test_kpis.py`) is the string transform
+itself: the prefixed value is unchanged apart from the leading
+apostrophe, for exactly those six trigger characters. No spreadsheet
+application (Excel, LibreOffice, Google Sheets, or any other) was opened,
+imported into, or scripted as part of this test suite, so this repo makes
+no tested claim about how any specific spreadsheet version, locale, or
+import path renders the result - only that the exported string itself no
+longer starts with an unescaped trigger character. This dashboard does
+not write `.xlsx` files at all (only CSV, via Streamlit's own download
+button), so there is no live-formula-cell concern the way there is in the
+`excel-consolidation` demo - the CSV formula-injection vector is the one
+that applies here, and it is defended (and tested) at the same layer the
+export happens in (`kpis.py`).
 
 ## How the sample database was produced
 
@@ -145,24 +169,18 @@ once, exactly as its own README documents (`generate` + `reconcile`,
 seed 42), and the resulting `reconciliation.duckdb` was copied here as a
 committed sample - not fetched or generated across repos at runtime. The
 mismatch report that same run wrote was copied alongside as
-`known_totals.json`, the independent ground truth this repo's tests
-reconcile against.
+`known_totals.json` - see "Known-total reconciliation" above and
+`data/sample/PROVENANCE.md` for exactly what that report is and what
+agreeing with it does and doesn't establish (it is not an independent
+check of the upstream reconciliation logic).
 
 ## QA screenshots
 
-`scripts/screenshot.py` launches the dashboard with `streamlit run` bound
-to `127.0.0.1` on a random free port, launches `google-chrome
---headless=new` on a separate random debugging port, drives it over raw
-Chrome DevTools Protocol (no Selenium/Playwright) to capture the rendered
-page at a 390px-wide phone viewport and a 1440px desktop viewport, then
-kills both processes by PID (not by port or name match), including on
-error. It needs `google-chrome` on `PATH` and the `websocket-client`
-package (`pip install websocket-client`; dev-only, see `LICENSES.md` -
-not a runtime dependency of the dashboard or the test suite):
-
-```bash
-PYTHONPATH=src python3 scripts/screenshot.py [output_dir]
-```
+Any screenshots of this dashboard (e.g. in a portfolio write-up) were
+taken locally with an ordinary browser pointed at `streamlit run`. That is
+a one-off manual QA step, outside this repo, and is not part of the demo,
+its tests, or anything this repo runs or ships - there is no screenshot
+step in `run_demo.sh` or the test suite.
 
 ## Limits
 
@@ -211,7 +229,7 @@ src/kpi_dashboard/
   app.py           Streamlit UI; renders what kpis.py returns, computes nothing itself
 streamlit_app.py   thin launcher (`streamlit run streamlit_app.py`) that wires src/ onto sys.path
 tests/             pytest suite (see "Tests" above)
-scripts/screenshot.py  QA: headless-Chrome/raw-CDP screenshots at 390px and desktop width
+scripts/screenshot.py  optional local dev script, not part of the demo (see "QA screenshots" above)
 data/sample/       vendored sample DuckDB + its known-totals ground truth (see PROVENANCE.md)
 docs/schema.md     the DuckDB schema this dashboard reads, reproduced from revenue-reconciliation
 LICENSES.md        every open-source library used and its licence

@@ -49,6 +49,24 @@ class SchemaError(RuntimeError):
 
 REQUIRED_TABLES = ("orders", "payments", "refunds", "daily_kpis", "mismatches", "runs", "run_issues")
 
+# Columns this module actually selects from each table (docs/schema.md).
+# orders/payments/refunds are not queried directly by this module (only
+# their existence is required above), so they are not listed here.
+REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
+    "runs": ("run_id", "run_at", "source_note", "status", "incomplete_sources", "issue_count"),
+    "daily_kpis": (
+        "run_id", "day", "currency", "gross_cents", "net_cents", "refunds_cents",
+        "paid_cents", "ordered_cents", "unmatched_count", "unmatched_cents",
+    ),
+    "mismatches": (
+        "run_id", "id", "category", "day", "order_id", "payment_id", "refund_id",
+        "currency", "amount_cents", "details",
+    ),
+    "run_issues": (
+        "run_id", "id", "source", "kind", "category", "record_id", "line_number", "detail",
+    ),
+}
+
 
 def open_database(db_path: str | Path) -> duckdb.DuckDBPyConnection:
     """Open the DuckDB file read-only, validating it before returning it.
@@ -80,6 +98,29 @@ def open_database(db_path: str | Path) -> duckdb.DuckDBPyConnection:
             con.close()
             raise SchemaError(
                 f"database is missing required table(s) {missing}: {path} "
+                "(wrong file, or written by an older schema version)"
+            )
+
+        # Table names alone aren't enough: an older schema version (e.g. no
+        # runs.status, no daily_kpis.currency) can have every required table
+        # present but be missing a column every query above assumes exists,
+        # which would otherwise pass this check and only fail later with an
+        # uncaught duckdb.BinderException deep in a query. Check columns too.
+        cols_by_table: dict[str, set[str]] = {}
+        for table_name, column_name in con.execute(
+            "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = 'main'"
+        ).fetchall():
+            cols_by_table.setdefault(table_name, set()).add(column_name)
+        missing_columns = [
+            f"{table}.{column}"
+            for table, columns in REQUIRED_COLUMNS.items()
+            for column in columns
+            if column not in cols_by_table.get(table, set())
+        ]
+        if missing_columns:
+            con.close()
+            raise SchemaError(
+                f"database is missing required column(s) {missing_columns}: {path} "
                 "(wrong file, or written by an older schema version)"
             )
     except duckdb.Error as exc:
@@ -265,6 +306,39 @@ class MismatchPage:
     @property
     def has_more(self) -> bool:
         return self.offset + self.returned_count < self.total_count
+
+
+def mismatch_query_key(
+    run_id: str, *, category: str | None, currency: str | None, limit: int
+) -> tuple[str, str | None, str | None, int]:
+    """Identity of a mismatch-drill-down query: everything that selects
+    *which rows* page 0 would start from. A stored page offset is only
+    ever valid for the query it was paginated from - reused against a
+    different key it points past whatever rows now match (or past all of
+    them), which is exactly the "no matches" bug this pairs with (see
+    ``resolve_page_offset``)."""
+    return (run_id, category, currency, limit)
+
+
+def resolve_page_offset(
+    stored_offset: int,
+    previous_key: tuple[str, str | None, str | None, int] | None,
+    current_key: tuple[str, str | None, str | None, int],
+) -> int:
+    """The offset to actually query with: 0 whenever the query identity
+    (run/category/currency/page-size) just changed, otherwise whatever was
+    stored.
+
+    Pure function, no Streamlit/session_state - this is the fix for the
+    reported bug (choose 10 rows, Next, then change a filter: the UI kept
+    the old numeric offset and rendered "no matches" against a filter that
+    actually has rows, because an offset valid for the old page had simply
+    outrun the new, usually-shorter result set). A page offset only ever
+    makes sense for the exact query it was computed against.
+    """
+    if previous_key is not None and previous_key != current_key:
+        return 0
+    return stored_offset
 
 
 def mismatch_page(

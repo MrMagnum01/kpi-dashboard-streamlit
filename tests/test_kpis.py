@@ -135,16 +135,37 @@ def test_open_database_accepts_the_vendored_sample():
         con.close()
 
 
+def _create_full_schema(con, *, omit: tuple[str, str] | None = None) -> None:
+    """Create every REQUIRED_TABLES table with every column this module
+    reads (REQUIRED_COLUMNS), all VARCHAR and empty - a minimal but
+    column-complete schema. ``omit=(table, column)`` drops one column, to
+    build an older-schema-version fixture for a single missing-column case."""
+    for table in kpis.REQUIRED_TABLES:
+        columns = list(kpis.REQUIRED_COLUMNS.get(table, ()))
+        if not columns:
+            columns = ["dummy"]
+        if omit is not None and omit[0] == table:
+            columns = [c for c in columns if c != omit[1]]
+        col_defs = ", ".join(f"{c} VARCHAR" for c in columns)
+        con.execute(f"CREATE TABLE {table} ({col_defs})")
+
+
+def test_open_database_rejects_database_missing_required_column(tmp_path):
+    """A schema missing runs.status (the older schema docs/schema.md says is
+    refused) must be caught at open_database, not surfaced as a crash the
+    first time a query touches the column - see test_kpis.py::MUST-FIX 2."""
+    p = tmp_path / "no_status_column.duckdb"
+    con = duckdb.connect(str(p))
+    _create_full_schema(con, omit=("runs", "status"))
+    con.close()
+    with pytest.raises(kpis.SchemaError, match=r"missing required column.*runs\.status"):
+        kpis.open_database(p)
+
+
 def test_empty_database_error_on_db_with_no_runs(tmp_path):
     p = tmp_path / "no_runs.duckdb"
     con = duckdb.connect(str(p))
-    con.execute(
-        "CREATE TABLE runs (run_id VARCHAR, run_at TIMESTAMP, source_note VARCHAR, "
-        "status VARCHAR, incomplete_sources VARCHAR, issue_count BIGINT)"
-    )
-    for table in kpis.REQUIRED_TABLES:
-        if table != "runs":
-            con.execute(f"CREATE TABLE {table} (dummy INTEGER)")
+    _create_full_schema(con)
     con.close()
     con2 = kpis.open_database(p)
     try:
@@ -196,6 +217,64 @@ def test_mismatch_page_rejects_bad_arguments(con, run_id):
         kpis.mismatch_page(con, run_id, limit=0)
     with pytest.raises(ValueError):
         kpis.mismatch_page(con, run_id, offset=-1)
+
+
+# --------------------------------------------------------------------------
+# MUST-FIX 1 regression: changing a filter after paging must reset to page 1.
+# Pure logic, no Streamlit/AppTest - kpis.resolve_page_offset has no UI
+# dependency at all, so the bug ("Next", then change a filter -> "no
+# matches" despite rows existing) is reproduced and pinned here directly.
+# --------------------------------------------------------------------------
+
+
+def test_resolve_page_offset_keeps_offset_when_query_key_unchanged():
+    key = kpis.mismatch_query_key("run-1", category=None, currency=None, limit=10)
+    assert kpis.resolve_page_offset(10, key, key) == 10
+
+
+def test_resolve_page_offset_resets_to_zero_when_category_changes():
+    old_key = kpis.mismatch_query_key("run-1", category=None, currency=None, limit=10)
+    new_key = kpis.mismatch_query_key("run-1", category="orphan_refund", currency=None, limit=10)
+    # Reproduces the reported bug: page to offset 10, then pick a filter
+    # that only has 4 matching rows - offset 10 must not survive.
+    assert kpis.resolve_page_offset(10, old_key, new_key) == 0
+
+
+def test_resolve_page_offset_resets_on_currency_run_or_page_size_change():
+    base = kpis.mismatch_query_key("run-1", category=None, currency=None, limit=10)
+    variants = [
+        kpis.mismatch_query_key("run-1", category=None, currency="EUR", limit=10),
+        kpis.mismatch_query_key("run-2", category=None, currency=None, limit=10),
+        kpis.mismatch_query_key("run-1", category=None, currency=None, limit=25),
+    ]
+    for variant in variants:
+        assert kpis.resolve_page_offset(10, base, variant) == 0
+
+
+def test_resolve_page_offset_treats_no_previous_key_as_first_render():
+    key = kpis.mismatch_query_key("run-1", category=None, currency=None, limit=10)
+    # First render of a session: nothing stored yet - use whatever offset
+    # was given (0, from session_state.get default) rather than forcing a
+    # reset that would just be a no-op.
+    assert kpis.resolve_page_offset(0, None, key) == 0
+
+
+def test_pagination_survives_a_filter_change_end_to_end(con, run_id):
+    """End-to-end version of the same fix at the kpis layer: page to the
+    last page under no filter, then switch to a filter with fewer rows -
+    the resolved offset must land on a page that actually has rows,
+    matching what the UI's "Showing N-M of total" caption promises."""
+    unfiltered = kpis.mismatch_page(con, run_id, limit=10)
+    assert unfiltered.total_count > 10  # sample must exercise > 1 page
+    old_key = kpis.mismatch_query_key(run_id, category=None, currency=None, limit=10)
+
+    filtered_key = kpis.mismatch_query_key(run_id, category="orphan_refund", currency=None, limit=10)
+    resolved_offset = kpis.resolve_page_offset(10, old_key, filtered_key)
+    assert resolved_offset == 0
+
+    filtered_page = kpis.mismatch_page(con, run_id, category="orphan_refund", offset=resolved_offset, limit=10)
+    assert filtered_page.total_count > 0
+    assert filtered_page.returned_count > 0
 
 
 # --------------------------------------------------------------------------

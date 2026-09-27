@@ -64,8 +64,7 @@ Pulled in by `streamlit` unless noted. Versions are what a clean
 
 | Library | Licence | Used for |
 |---|---|---|
-| [websocket-client](https://github.com/websocket-client/websocket-client) | Apache-2.0 | `scripts/screenshot.py` only - drives headless Chrome over the DevTools Protocol for QA screenshots. Not imported by `src/` or `tests/`, and not in `requirements.txt`; install it ad hoc (`pip install websocket-client`) only to run that script. |
-| [google-chrome](https://www.google.com/chrome/) | proprietary, used only as an external browser binary, not installed or redistributed by this repo | Same script, as the headless browser process it drives over CDP - not a Python dependency and not shipped here. |
+| [websocket-client](https://github.com/websocket-client/websocket-client) | Apache-2.0 | `scripts/screenshot.py` only, an optional local dev script that is not part of the demo (see README's "QA screenshots"). Not imported by `src/` or `tests/`, and not in `requirements.txt`; install it ad hoc (`pip install websocket-client`) only to run that script. |
 
 ## Notices
 
@@ -76,6 +75,6 @@ carries its own licence and notice files, and those must be preserved in
 any distribution that includes them.
 
 No paid or closed-source service is used anywhere in this project's own
-code, tests, or runtime dependencies. `google-chrome`, used only as an
-external, locally-installed browser process by the optional QA script, is
-noted above for completeness and is not a dependency of the dashboard.
+code, tests, or runtime dependencies. Any screenshots of this dashboard
+were taken locally with an ordinary browser, outside this repo; that is
+not part of the demo and involves no dependency listed here.
